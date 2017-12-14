@@ -178,7 +178,9 @@ func (n *Client) SubEncoded(topic string, callback natsCB) error {
 }
 
 func (n *Client) SubProtoEncoded(topic string, callback interface{}) error {
-
+	if !n.c.IsConnected() {
+		return fmt.Errorf("NATS client is not connected")
+	}
 	if sub, err := n.protoCon.QueueSubscribe(topic, "distributed-queue-proto-encoded", callback); err == nil {
 		if sub.IsValid() && !n.isSubscribed(topic) {
 			n.subs[topic] = sub
@@ -191,6 +193,9 @@ func (n *Client) SubProtoEncoded(topic string, callback interface{}) error {
 }
 
 func (n *Client) PublishProtoRequest(topic, reply string, v interface{}) error {
+	if !n.c.IsConnected() {
+		return fmt.Errorf("NATS client is not connected")
+	}
 	if err := n.protoCon.PublishRequest(topic, reply, v); err != nil {
 		n.log.Error(err)
 		return err
@@ -199,6 +204,9 @@ func (n *Client) PublishProtoRequest(topic, reply string, v interface{}) error {
 }
 
 func (n *Client) PublishProtoEncoded(topic string, v interface{}) error {
+	if !n.c.IsConnected() {
+		return fmt.Errorf("NATS client is not connected")
+	}
 	if err := n.protoCon.Publish(topic, v); err != nil {
 		n.log.Error(err)
 		return err

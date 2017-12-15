@@ -192,11 +192,11 @@ func (n *Client) SubProtoEncoded(topic string, callback interface{}) error {
 	return nil
 }
 
-func (n *Client) PublishProtoRequest(topic, reply string, v interface{}) error {
+func (n *Client) ProtoRequest(topic string, request interface{}, v interface{}) error {
 	if !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
-	if err := n.protoCon.PublishRequest(topic, reply, v); err != nil {
+	if err := n.protoCon.Request(topic, request, v, 15*time.Second); err != nil {
 		n.log.Error(err)
 		return err
 	}

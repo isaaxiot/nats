@@ -78,6 +78,8 @@ func (n *Client) connect() {
 	n.mtx.Lock()
 	defer n.mtx.Unlock()
 
+	n.c = &nats.Conn{}
+
 	if natsConnection, err := nats.Connect(n.url); err != nil {
 		n.log.Println("Error connecting to NATS server: ", err.Error())
 		n.retry()

@@ -3,12 +3,14 @@ package nats
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/nats-io/go-nats"
-	"github.com/sirupsen/logrus"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nats-io/go-nats"
+	"github.com/nats-io/go-nats/encoders/protobuf"
+	"github.com/sirupsen/logrus"
 )
 
 const connectionRetries = 10
@@ -24,14 +26,15 @@ type NATSReply struct {
 }
 
 type Client struct {
-	mtx  sync.Mutex                    //mutex
-	c    *nats.Conn                    //nats client connection
-	nc   *nats.EncodedConn             //nats encoded connection
-	subs map[string]*nats.Subscription //active subscriptions
-	cbs  map[string]func(msg *nats.Msg)
-	cbse map[string]natsCB
-	log  *logrus.Entry
-	url  string
+	mtx      sync.Mutex                    //mutex
+	c        *nats.Conn                    //nats client connection
+	jsonCon  *nats.EncodedConn             //nats json encoded connection
+	protoCon *nats.EncodedConn             //nats proto encoded connection
+	subs     map[string]*nats.Subscription //active subscriptions
+	cbs      map[string]func(msg *nats.Msg)
+	cbse     map[string]natsCB
+	log      *logrus.Entry
+	url      string
 }
 
 // New returns new instance of NATS client
@@ -61,7 +64,7 @@ func (n *Client) retry() {
 			} else {
 				retry.Stop()
 				n.c = natsConnection
-				if n.nc, err = nats.NewEncodedConn(n.c, nats.JSON_ENCODER); err != nil {
+				if n.jsonCon, err = nats.NewEncodedConn(n.c, nats.JSON_ENCODER); err != nil {
 					n.log.Error("Error creating nats encoded connection: ", err.Error())
 				}
 				return
@@ -75,13 +78,18 @@ func (n *Client) connect() {
 	n.mtx.Lock()
 	defer n.mtx.Unlock()
 
+	n.c = &nats.Conn{}
+
 	if natsConnection, err := nats.Connect(n.url); err != nil {
 		n.log.Println("Error connecting to NATS server: ", err.Error())
 		n.retry()
 	} else {
 		n.c = natsConnection
-		if n.nc, err = nats.NewEncodedConn(n.c, nats.JSON_ENCODER); err != nil {
-			n.log.Error("error creating nats encoded connection: ", err.Error())
+		if n.jsonCon, err = nats.NewEncodedConn(n.c, nats.JSON_ENCODER); err != nil {
+			n.log.Error("error creating nats json encoded connection: ", err.Error())
+		}
+		if n.protoCon, err = nats.NewEncodedConn(n.c, protobuf.PROTOBUF_ENCODER); err != nil {
+			n.log.Error("error creating nats protobuf encoded connection: ", err.Error())
 		}
 	}
 }
@@ -90,7 +98,7 @@ func (n *Client) Publish(topic string, payload interface{}) error {
 	if !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
-	if err := n.nc.Publish(topic, payload); err != nil {
+	if err := n.jsonCon.Publish(topic, payload); err != nil {
 		n.log.Error("error publishing to nats broker:", err.Error())
 		return err
 	}
@@ -111,7 +119,7 @@ func (n *Client) PublishRequest(topic, reply string, payload interface{}) error 
 	if !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
-	if err := n.nc.PublishRequest(topic, reply, payload); err != nil {
+	if err := n.jsonCon.PublishRequest(topic, reply, payload); err != nil {
 		n.log.Error("error publishing to nats broker:", err.Error())
 		return err
 	}
@@ -159,12 +167,49 @@ func (n *Client) SubEncoded(topic string, callback natsCB) error {
 	if !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
-	if sub, err := n.nc.QueueSubscribe(topic, "distributed-queue-encoded", n.CallbackE); err == nil {
+	if sub, err := n.jsonCon.QueueSubscribe(topic, "distributed-queue-encoded", n.CallbackE); err == nil {
 		n.cbse[topic] = callback
 		if sub.IsValid() && !n.isSubscribed(topic) {
 			n.subs[topic] = sub
 		}
 	} else {
+		n.log.Error(err)
+		return err
+	}
+	return nil
+}
+
+func (n *Client) SubProtoEncoded(topic string, callback interface{}) error {
+	if !n.c.IsConnected() {
+		return fmt.Errorf("NATS client is not connected")
+	}
+	if sub, err := n.protoCon.QueueSubscribe(topic, "distributed-queue-proto-encoded", callback); err == nil {
+		if sub.IsValid() && !n.isSubscribed(topic) {
+			n.subs[topic] = sub
+		}
+	} else {
+		n.log.Error(err)
+		return err
+	}
+	return nil
+}
+
+func (n *Client) ProtoRequest(topic string, request interface{}, v interface{}) error {
+	if !n.c.IsConnected() {
+		return fmt.Errorf("NATS client is not connected")
+	}
+	if err := n.protoCon.Request(topic, request, v, 15*time.Second); err != nil {
+		n.log.Error(err)
+		return err
+	}
+	return nil
+}
+
+func (n *Client) PublishProtoEncoded(topic string, v interface{}) error {
+	if !n.c.IsConnected() {
+		return fmt.Errorf("NATS client is not connected")
+	}
+	if err := n.protoCon.Publish(topic, v); err != nil {
 		n.log.Error(err)
 		return err
 	}
@@ -224,7 +269,7 @@ func (n *Client) Request(subj string, request interface{}, data interface{}) err
 		Data    json.RawMessage
 	}{}
 
-	if err := n.nc.Request(subj, request, &response, 15*time.Second); err != nil {
+	if err := n.jsonCon.Request(subj, request, &response, 15*time.Second); err != nil {
 		n.log.WithField("subj", subj).Error(err)
 		return err
 	}

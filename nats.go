@@ -95,7 +95,7 @@ func (n *Client) connect() {
 }
 
 func (n *Client) Publish(topic string, payload interface{}) error {
-	if !n.c.IsConnected() {
+	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
 	if err := n.jsonCon.Publish(topic, payload); err != nil {
@@ -106,7 +106,7 @@ func (n *Client) Publish(topic string, payload interface{}) error {
 }
 
 func (n *Client) PublishPlain(topic string, payload []byte) error {
-	if !n.c.IsConnected() {
+	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
 	if err := n.c.Publish(topic, payload); err != nil {
@@ -116,7 +116,7 @@ func (n *Client) PublishPlain(topic string, payload []byte) error {
 }
 
 func (n *Client) PublishRequest(topic, reply string, payload interface{}) error {
-	if !n.c.IsConnected() {
+	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
 	if err := n.jsonCon.PublishRequest(topic, reply, payload); err != nil {
@@ -164,7 +164,7 @@ func (n *Client) SubEncoded(topic string, callback natsCB) error {
 	n.mtx.Lock()
 	defer n.mtx.Unlock()
 	n.log.Debug("SubEncoded: " + topic)
-	if !n.c.IsConnected() {
+	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
 	if sub, err := n.jsonCon.QueueSubscribe(topic, "distributed-queue-encoded", n.CallbackE); err == nil {
@@ -220,10 +220,29 @@ func (n *Client) Subscribe(topic string, callback func(msg *nats.Msg)) error {
 	n.mtx.Lock()
 	defer n.mtx.Unlock()
 	n.log.Debug("Subscribe: " + topic)
-	if !n.c.IsConnected() {
+	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
 	if sub, err := n.c.QueueSubscribe(topic, "distributed-queue", n.Callback); err == nil {
+		n.cbs[topic] = callback
+		if sub.IsValid() && !n.isSubscribed(topic) {
+			n.subs[topic] = sub
+		}
+	} else {
+		n.log.Error(err)
+		return err
+	}
+	return nil
+}
+
+func (n *Client) SimpleSubscribe(topic string, callback func(msg *nats.Msg)) error {
+	n.mtx.Lock()
+	defer n.mtx.Unlock()
+	n.log.Debug("Subscribe: " + topic)
+	if n.c == nil || !n.c.IsConnected() {
+		return fmt.Errorf("NATS client is not connected")
+	}
+	if sub, err := n.c.Subscribe(topic, n.Callback); err == nil {
 		n.cbs[topic] = callback
 		if sub.IsValid() && !n.isSubscribed(topic) {
 			n.subs[topic] = sub
@@ -256,10 +275,7 @@ func (n *Client) Unsubscribe(topic string) error {
 
 func (n *Client) Request(subj string, request interface{}, data interface{}) error {
 	n.log.WithField("subj", subj).WithField("request", request).Info("Request")
-	if !n.c.IsConnected() {
-		time.Sleep(time.Second)
-	}
-	if !n.c.IsConnected() {
+	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
 	response := struct {

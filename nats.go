@@ -15,9 +15,13 @@ import (
 
 const connectionRetries = 10
 
-type natsCB func(subj, reply string, msg map[string]interface{})
+type natsCB func(topic, reply string, msg map[string]interface{})
 
-//NATSReply is a common response format on NATS requests
+type Metrics interface {
+	MeasureSince(key string, start time.Time)
+}
+
+// NATSReply is a common response format on NATS requests
 type NATSReply struct {
 	Success bool        `json:"success"`
 	Message string      `json:"message,omitempty"`
@@ -25,6 +29,7 @@ type NATSReply struct {
 	Data    interface{} `json:"data,omitempty"`
 }
 
+// Client nats client wrapper
 type Client struct {
 	mtx      sync.Mutex                    //mutex
 	c        *nats.Conn                    //nats client connection
@@ -35,6 +40,7 @@ type Client struct {
 	cbse     map[string]natsCB
 	log      *logrus.Entry
 	url      string
+	metrics  Metrics
 }
 
 // New returns new instance of NATS client
@@ -47,6 +53,21 @@ func New(url, instance string) *Client {
 	n.cbse = make(map[string]natsCB)
 	n.log = logrus.WithField("service", "NATS").WithField("i", instance)
 	return n
+}
+
+// TrackStats injects stats tracker
+func (n *Client) TrackStats(m Metrics) {
+	n.metrics = m
+}
+
+func (n *Client) measure(key string, start time.Time) {
+	if n.metrics != nil {
+		n.metrics.MeasureSince(key, start)
+	}
+}
+
+func (n *Client) GetStats() Metrics {
+	return n.metrics
 }
 
 func (n *Client) retry() {
@@ -150,14 +171,14 @@ func (n *Client) findWildcardSubscription(topic string, list map[string]func(msg
 	return "", fmt.Errorf("callback for ", topic, " is not set")
 }
 
-func (n *Client) CallbackE(subj, reply string, msg map[string]interface{}) {
+func (n *Client) CallbackE(topic, reply string, msg map[string]interface{}) {
 	defer func() {
 		if recovery := recover(); recovery != nil {
 			n.log.WithField("bt", string(debug.Stack())).Error("Recovered from:", recovery)
 		}
 	}()
-	n.log.WithField("data", msg).WithField("reply", reply).Debug(subj)
-	n.cbse[subj](subj, reply, msg)
+	n.log.WithField("data", msg).WithField("reply", reply).Debug(topic)
+	n.cbse[topic](topic, reply, msg)
 }
 
 func (n *Client) SubEncoded(topic string, callback natsCB) error {
@@ -277,8 +298,9 @@ func (n *Client) Unsubscribe(topic string) error {
 	return nil
 }
 
-func (n *Client) Request(subj string, request interface{}, data interface{}) error {
-	n.log.WithField("subj", subj).WithField("request", request).Info("Request")
+func (n *Client) Request(topic string, request interface{}, data interface{}) error {
+	defer n.measure(topic, time.Now())
+	n.log.WithField("topic", topic).WithField("request", request).Info("Request")
 	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
@@ -289,11 +311,11 @@ func (n *Client) Request(subj string, request interface{}, data interface{}) err
 		Data    json.RawMessage
 	}{}
 
-	if err := n.jsonCon.Request(subj, request, &response, 15*time.Second); err != nil {
-		n.log.WithField("subj", subj).Error(err)
+	if err := n.jsonCon.Request(topic, request, &response, 15*time.Second); err != nil {
+		n.log.WithField("topic", topic).Error(err)
 		return err
 	}
-	n.log.WithField("subj", subj).WithField("response", response.Success).WithField("response", response.Message).WithField("data", string(response.Data)).Debug("Response")
+	n.log.WithField("topic", topic).WithField("response", response.Success).WithField("response", response.Message).WithField("data", string(response.Data)).Debug("Response")
 
 	if !response.Success {
 		if response.Message == "record not found" {

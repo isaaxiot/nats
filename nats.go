@@ -262,14 +262,18 @@ func (n *Client) isSubscribed(topic string) bool {
 func (n *Client) Unsubscribe(topic string) error {
 	n.mtx.Lock()
 	defer n.mtx.Unlock()
+	fmt.Println("Before:", len(n.subs))
 	if sub, ok := n.subs[topic]; ok {
 		if sub.IsValid() {
 			if err := sub.Unsubscribe(); err != nil {
 				return err
 			}
+		} else {
+			return fmt.Errorf("sub is not valid")
 		}
 		delete(n.subs, topic)
 	}
+	fmt.Println("After:", len(n.subs))
 	return nil
 }
 

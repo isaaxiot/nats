@@ -201,6 +201,8 @@ func (n *Client) SubEncoded(topic string, callback natsCB) error {
 }
 
 func (n *Client) SubProtoEncoded(topic string, callback interface{}) error {
+	n.mtx.Lock()
+	defer n.mtx.Unlock()
 	if !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}

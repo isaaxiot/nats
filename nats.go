@@ -16,6 +16,7 @@ import (
 const connectionRetries = 10
 
 type natsCB func(topic, reply string, msg map[string]interface{})
+type handler interface{}
 
 type Metrics interface {
 	MeasureSince(key string, start time.Time)
@@ -39,14 +40,23 @@ type Client struct {
 	cbs      map[string]func(msg *nats.Msg)
 	cbse     map[string]natsCB
 	log      *logrus.Entry
-	url      string
 	metrics  Metrics
+	opts     nats.Options
 }
 
 // New returns new instance of NATS client
 func New(url, instance string) *Client {
 	n := &Client{subs: make(map[string]*nats.Subscription)}
-	n.url = url
+	n.opts = nats.Options{
+		Url:            url,
+		AllowReconnect: true,
+		MaxReconnect:   100,
+		ReconnectWait:  100 * time.Millisecond,
+		Timeout:        nats.DefaultTimeout,
+		AsyncErrorCB: func(_ *nats.Conn, s *nats.Subscription, e error) {
+			n.log.WithField("subj", s.Subject).Error(e)
+		},
+	}
 	go n.connect()
 	n.subs = make(map[string]*nats.Subscription)
 	n.cbs = make(map[string]func(msg *nats.Msg))
@@ -60,14 +70,15 @@ func (n *Client) TrackStats(m Metrics) {
 	n.metrics = m
 }
 
+// GetStats returns metrics object
+func (n *Client) GetStats() Metrics {
+	return n.metrics
+}
+
 func (n *Client) measure(key string, start time.Time) {
 	if n.metrics != nil {
 		n.metrics.MeasureSince(key, start)
 	}
-}
-
-func (n *Client) GetStats() Metrics {
-	return n.metrics
 }
 
 func (n *Client) retry() {
@@ -76,7 +87,7 @@ func (n *Client) retry() {
 	for {
 		select {
 		case <-retry.C:
-			if natsConnection, err := nats.Connect(n.url); err != nil {
+			if natsConnection, err := n.opts.Connect(); err != nil {
 				if i >= connectionRetries {
 					n.log.Error("Error connecting to NATS server: ", err.Error())
 					i = 0
@@ -101,7 +112,7 @@ func (n *Client) connect() {
 
 	n.c = &nats.Conn{}
 
-	if natsConnection, err := nats.Connect(n.url); err != nil {
+	if natsConnection, err := n.opts.Connect(); err != nil {
 		n.log.Println("Error connecting to NATS server: ", err.Error())
 		n.retry()
 	} else {
@@ -119,6 +130,7 @@ func (n *Client) Publish(topic string, payload interface{}) error {
 	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
+	n.log.WithField("topic", topic).WithField("payload", payload).Info("Publish")
 	if err := n.jsonCon.Publish(topic, payload); err != nil {
 		n.log.Error("error publishing to nats broker:", err.Error())
 		return err
@@ -184,13 +196,33 @@ func (n *Client) CallbackE(topic, reply string, msg map[string]interface{}) {
 func (n *Client) SubEncoded(topic string, callback natsCB) error {
 	n.mtx.Lock()
 	defer n.mtx.Unlock()
-	n.log.Debug("SubEncoded: " + topic)
+	// n.log.Debug("SubEncoded: " + topic)
 	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
 	if sub, err := n.jsonCon.QueueSubscribe(topic, "distributed-queue-encoded", n.CallbackE); err == nil {
 		n.cbse[topic] = callback
 		if sub.IsValid() && !n.isSubscribed(topic) {
+			n.subs[topic] = sub
+		}
+	} else {
+		n.log.Error(err)
+		return err
+	}
+	return nil
+}
+
+// SubscribeTo unsafe subscriber with auto unmarshal
+func (n *Client) SubscribeTo(topic string, callback handler) error {
+	n.mtx.Lock()
+	defer n.mtx.Unlock()
+	if n.c == nil || !n.c.IsConnected() {
+		return fmt.Errorf("NATS client is not connected")
+	}
+
+	if sub, err := n.jsonCon.Subscribe(topic, callback); err == nil {
+		if sub.IsValid() && !n.isSubscribed(topic) {
+			n.log.WithField("topic", topic).Debug("Subscribed")
 			n.subs[topic] = sub
 		}
 	} else {
@@ -242,7 +274,7 @@ func (n *Client) PublishProtoEncoded(topic string, v interface{}) error {
 func (n *Client) Subscribe(topic string, callback func(msg *nats.Msg)) error {
 	n.mtx.Lock()
 	defer n.mtx.Unlock()
-	n.log.Debug("Subscribe: " + topic)
+	// n.log.Debug("Subscribe: " + topic)
 	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}

@@ -63,7 +63,7 @@ func New(url, instance string) *Client {
 	n.subs = make(map[string]*nats.Subscription)
 	n.cbs = make(map[string]func(msg *nats.Msg))
 	n.cbse = make(map[string]natsCB)
-	n.log = logrus.WithField("service", "NATS").WithField("i", instance)
+	n.log = logrus.WithField("service", "NATS").WithField("instance", instance)
 	return n
 }
 
@@ -93,12 +93,11 @@ func (n *Client) retry() {
 				if i >= connectionRetries {
 					n.log.Error("Error connecting to NATS server: ", err.Error())
 					i = 0
-					// return
 				}
 			} else {
 				retry.Stop()
 				n.c = natsConnection
-				n.log.Info("Connected to ", n.c.ConnectedUrl())
+				n.log.WithField("Broker", n.c.ConnectedUrl()).Info("NATS Client connected")
 				if n.jsonCon, err = nats.NewEncodedConn(n.c, nats.JSON_ENCODER); err != nil {
 					n.log.Error("Error creating nats encoded connection: ", err.Error())
 				}
@@ -120,7 +119,7 @@ func (n *Client) connect() {
 		n.retry()
 	} else {
 		n.c = natsConnection
-		n.log.Info("Connected to ", n.c.ConnectedUrl())
+		n.log.WithField("Broker", n.c.ConnectedUrl()).Info("NATS Client connected")
 		if n.jsonCon, err = nats.NewEncodedConn(n.c, nats.JSON_ENCODER); err != nil {
 			n.log.Error("error creating nats json encoded connection: ", err.Error())
 		}

@@ -42,22 +42,23 @@ type Client struct {
 	cbse     map[string]natsCB
 	log      *logrus.Entry
 	metrics  Metrics
-	opts     nats.Options
+	opts     []nats.Option
+	url      string
 }
 
 // New returns new instance of NATS client
 func New(url, instance string) *Client {
 	n := &Client{subs: make(map[string]*nats.Subscription)}
-	n.opts = nats.Options{
-		Url:            url,
-		AllowReconnect: true,
-		MaxReconnect:   100,
-		ReconnectWait:  100 * time.Millisecond,
-		Timeout:        nats.DefaultTimeout,
-		AsyncErrorCB: func(_ *nats.Conn, s *nats.Subscription, e error) {
-			n.log.WithField("subj", s.Subject).Error(e)
-		},
-	}
+	n.url = url
+	n.opts = append(n.opts, nats.ErrorHandler(func(_ *nats.Conn, s *nats.Subscription, e error) {
+		n.log.WithField("subj", s.Subject).Error(e)
+	}))
+	n.opts = append(n.opts, nats.DisconnectHandler(func(nc *nats.Conn) {
+		n.log.WithField("err", nc.LastError()).Warn("Disconnected")
+	}))
+	n.opts = append(n.opts, nats.ReconnectHandler(func(nc *nats.Conn) {
+		n.log.WithField("err", nc.LastError()).Info("Got reconnected to ", nc.ConnectedUrl())
+	}))
 	go n.connect()
 	n.subs = make(map[string]*nats.Subscription)
 	n.cbs = make(map[string]func(msg *nats.Msg))
@@ -88,7 +89,7 @@ func (n *Client) retry() {
 	for {
 		select {
 		case <-retry.C:
-			if natsConnection, err := n.opts.Connect(); err != nil {
+			if natsConnection, err := nats.Connect(n.url, n.opts...); err != nil {
 				if i >= connectionRetries {
 					n.log.Error("Error connecting to NATS server: ", err.Error())
 					i = 0
@@ -97,6 +98,7 @@ func (n *Client) retry() {
 			} else {
 				retry.Stop()
 				n.c = natsConnection
+				n.log.Info("Connected to ", n.c.ConnectedUrl())
 				if n.jsonCon, err = nats.NewEncodedConn(n.c, nats.JSON_ENCODER); err != nil {
 					n.log.Error("Error creating nats encoded connection: ", err.Error())
 				}
@@ -113,11 +115,12 @@ func (n *Client) connect() {
 
 	n.c = &nats.Conn{}
 
-	if natsConnection, err := n.opts.Connect(); err != nil {
+	if natsConnection, err := nats.Connect(n.url, n.opts...); err != nil {
 		n.log.Println("Error connecting to NATS server: ", err.Error())
 		n.retry()
 	} else {
 		n.c = natsConnection
+		n.log.Info("Connected to ", n.c.ConnectedUrl())
 		if n.jsonCon, err = nats.NewEncodedConn(n.c, nats.JSON_ENCODER); err != nil {
 			n.log.Error("error creating nats json encoded connection: ", err.Error())
 		}

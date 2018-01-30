@@ -17,6 +17,7 @@ const connectionRetries = 10
 
 type natsCB func(topic, reply string, msg map[string]interface{})
 type handler interface{}
+type plainHandler func(msg *nats.Msg)
 
 type Metrics interface {
 	MeasureSince(key string, start time.Time)
@@ -212,17 +213,49 @@ func (n *Client) SubEncoded(topic string, callback natsCB) error {
 	return nil
 }
 
-// SubscribeTo unsafe subscriber with auto unmarshal
-func (n *Client) SubscribeTo(topic string, callback handler) error {
+func (n *Client) PlainSubscribe(topic string, callback plainHandler, extra ...bool) error {
+	n.mtx.Lock()
+	defer n.mtx.Unlock()
+	// n.log.Debug("Subscribe: " + topic)
+	if n.c == nil || !n.c.IsConnected() {
+		return fmt.Errorf("NATS client is not connected")
+	}
+	queue := true
+	if len(extra) > 0 {
+		queue = extra[0]
+	}
+	var (
+		sub *nats.Subscription
+		err error
+	)
+	if queue {
+		sub, err = n.c.QueueSubscribe(topic, "distributed-queue", n.Callback)
+	} else {
+		sub, err = n.c.Subscribe(topic, n.Callback)
+	}
+	if err != nil {
+		n.log.Error(err)
+		return err
+	}
+	n.cbs[topic] = callback
+	if sub.IsValid() && !n.isSubscribed(topic) {
+		n.subs[topic] = sub
+	}
+	return nil
+}
+
+func (n *Client) subscribe(topic string, callback handler, protobuf bool) error {
 	n.mtx.Lock()
 	defer n.mtx.Unlock()
 	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
-
-	if sub, err := n.jsonCon.Subscribe(topic, callback); err == nil {
+	conn := n.jsonCon
+	if protobuf {
+		conn = n.protoCon
+	}
+	if sub, err := conn.QueueSubscribe(topic, "distributed-queue-encoded", callback); err == nil {
 		if sub.IsValid() && !n.isSubscribed(topic) {
-			n.log.WithField("topic", topic).Debug("Subscribed")
 			n.subs[topic] = sub
 		}
 	} else {
@@ -232,21 +265,13 @@ func (n *Client) SubscribeTo(topic string, callback handler) error {
 	return nil
 }
 
-func (n *Client) SubProtoEncoded(topic string, callback interface{}) error {
-	n.mtx.Lock()
-	defer n.mtx.Unlock()
-	if !n.c.IsConnected() {
-		return fmt.Errorf("NATS client is not connected")
-	}
-	if sub, err := n.protoCon.QueueSubscribe(topic, "distributed-queue-proto-encoded", callback); err == nil {
-		if sub.IsValid() && !n.isSubscribed(topic) {
-			n.subs[topic] = sub
-		}
-	} else {
-		n.log.Error(err)
-		return err
-	}
-	return nil
+// SubscribeTo unsafe subscriber with auto unmarshal
+func (n *Client) Subscribe(topic string, callback handler) error {
+	return n.subscribe(topic, callback, false)
+}
+
+func (n *Client) ProtoSubscribe(topic string, callback handler) error {
+	return n.subscribe(topic, callback, true)
 }
 
 func (n *Client) ProtoRequest(topic string, request interface{}, v interface{}) error {
@@ -265,44 +290,6 @@ func (n *Client) PublishProtoEncoded(topic string, v interface{}) error {
 		return fmt.Errorf("NATS client is not connected")
 	}
 	if err := n.protoCon.Publish(topic, v); err != nil {
-		n.log.Error(err)
-		return err
-	}
-	return nil
-}
-
-func (n *Client) Subscribe(topic string, callback func(msg *nats.Msg)) error {
-	n.mtx.Lock()
-	defer n.mtx.Unlock()
-	// n.log.Debug("Subscribe: " + topic)
-	if n.c == nil || !n.c.IsConnected() {
-		return fmt.Errorf("NATS client is not connected")
-	}
-	if sub, err := n.c.QueueSubscribe(topic, "distributed-queue", n.Callback); err == nil {
-		n.cbs[topic] = callback
-		if sub.IsValid() && !n.isSubscribed(topic) {
-			n.subs[topic] = sub
-		}
-	} else {
-		n.log.Error(err)
-		return err
-	}
-	return nil
-}
-
-func (n *Client) SimpleSubscribe(topic string, callback func(msg *nats.Msg)) error {
-	n.mtx.Lock()
-	defer n.mtx.Unlock()
-	n.log.Debug("Subscribe: " + topic)
-	if n.c == nil || !n.c.IsConnected() {
-		return fmt.Errorf("NATS client is not connected")
-	}
-	if sub, err := n.c.Subscribe(topic, n.Callback); err == nil {
-		n.cbs[topic] = callback
-		if sub.IsValid() && !n.isSubscribed(topic) {
-			n.subs[topic] = sub
-		}
-	} else {
 		n.log.Error(err)
 		return err
 	}

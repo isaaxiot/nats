@@ -133,7 +133,7 @@ func (n *Client) Publish(topic string, payload interface{}) error {
 	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
-	n.log.WithField("topic", topic).WithField("payload", payload).Info("Publish")
+	n.log.WithField("topic", topic).WithField("payload", payload).Debug("Publish")
 	if err := n.jsonCon.Publish(topic, payload); err != nil {
 		n.log.Error("error publishing to nats broker:", err.Error())
 		return err
@@ -321,7 +321,7 @@ func (n *Client) Unsubscribe(topic string) error {
 
 func (n *Client) Request(topic string, request interface{}, data interface{}) error {
 	defer n.measure(topic, time.Now())
-	n.log.WithField("topic", topic).WithField("request", request).Info("Request")
+	n.log.WithField("topic", topic).WithField("request", request).Debug("Request")
 	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}

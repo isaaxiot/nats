@@ -141,6 +141,17 @@ func (n *Client) Publish(topic string, payload interface{}) error {
 	return nil
 }
 
+func (n *Client) ProtoPublish(topic string, v interface{}) error {
+	if !n.c.IsConnected() {
+		return fmt.Errorf("NATS client is not connected")
+	}
+	if err := n.protoCon.Publish(topic, v); err != nil {
+		n.log.Error(err)
+		return err
+	}
+	return nil
+}
+
 func (n *Client) PublishPlain(topic string, payload []byte) error {
 	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")

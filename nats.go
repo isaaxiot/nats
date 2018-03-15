@@ -258,6 +258,11 @@ func (n *Client) PlainSubscribe(topic string, callback plainHandler, extra ...bo
 }
 
 func (n *Client) subscribe(topic string, callback handler, protobuf bool) error {
+	defer func() {
+		if recovery := recover(); recovery != nil {
+			n.log.WithField("bt", string(debug.Stack())).Error("Recovered from:", recovery)
+		}
+	}()
 	n.mtx.Lock()
 	defer n.mtx.Unlock()
 	if n.c == nil || !n.c.IsConnected() {

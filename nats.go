@@ -44,6 +44,7 @@ type Client struct {
 	metrics  Metrics
 	opts     []nats.Option
 	url      string
+	Debug    bool
 }
 
 // New returns new instance of NATS client
@@ -64,6 +65,7 @@ func New(url, instance string) *Client {
 	n.cbs = make(map[string]func(msg *nats.Msg))
 	n.cbse = make(map[string]natsCB)
 	n.log = logrus.WithField("service", "NATS").WithField("instance", instance)
+	n.Debug = true
 	return n
 }
 
@@ -91,15 +93,16 @@ func (n *Client) retry() {
 		case <-retry.C:
 			if natsConnection, err := nats.Connect(n.url, n.opts...); err != nil {
 				if i >= connectionRetries {
-					n.log.Error("Error connecting to NATS server: ", err.Error())
+					n.log.Error("error connecting to NATS server: ", err.Error())
 					i = 0
 				}
 			} else {
 				retry.Stop()
 				n.c = natsConnection
-				n.log.WithField("Broker", n.c.ConnectedUrl()).Info("NATS Client connected")
+				n.log.WithField("broker", n.c.ConnectedUrl()).Info("NATS Client connected")
+
 				if n.jsonCon, err = nats.NewEncodedConn(n.c, nats.JSON_ENCODER); err != nil {
-					n.log.Error("Error creating nats encoded connection: ", err.Error())
+					n.log.Error("error creating NATS encoded connection: ", err.Error())
 				}
 				return
 			}
@@ -115,7 +118,7 @@ func (n *Client) connect() {
 	n.c = &nats.Conn{}
 
 	if natsConnection, err := nats.Connect(n.url, n.opts...); err != nil {
-		n.log.Println("Error connecting to NATS server: ", err.Error())
+		n.log.Error("error connecting to NATS server: ", err.Error())
 		n.retry()
 	} else {
 		n.c = natsConnection
@@ -129,11 +132,27 @@ func (n *Client) connect() {
 	}
 }
 
+func (n *Client) SwitchDebug(enable bool) *Client {
+	n.mtx.Lock()
+	defer n.mtx.Unlock()
+	n.Debug = enable
+	return n
+}
+
+func (n *Client) debug(topic string, payload interface{}, message string) {
+	if !n.Debug {
+		return
+	}
+	n.log.WithField("topic", topic).WithField("payload", payload).Debug(message)
+}
+
 func (n *Client) Publish(topic string, payload interface{}) error {
 	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
-	n.log.WithField("topic", topic).WithField("payload", payload).Debug("Publish")
+
+	n.debug(topic, payload, "publish")
+
 	if err := n.jsonCon.Publish(topic, payload); err != nil {
 		n.log.Error("error publishing to nats broker:", err.Error())
 		return err
@@ -179,7 +198,7 @@ func (n *Client) Callback(msg *nats.Msg) {
 			n.log.WithField("bt", string(debug.Stack())).Error("Recovered from:", recovery)
 		}
 	}()
-	n.log.WithField("data", string(msg.Data)).WithField("reply", msg.Reply).Debug(msg.Subject)
+	n.debug(msg.Reply, string(msg.Data), msg.Subject)
 	if name, err := n.findWildcardSubscription(msg.Subject, n.cbs); err == nil {
 		n.cbs[name](msg)
 	}
@@ -203,7 +222,7 @@ func (n *Client) CallbackE(topic, reply string, msg map[string]interface{}) {
 			n.log.WithField("bt", string(debug.Stack())).Error("Recovered from:", recovery)
 		}
 	}()
-	n.log.WithField("data", msg).WithField("reply", reply).Debug(topic)
+	n.debug(reply, msg, topic)
 	n.cbse[topic](topic, reply, msg)
 }
 
@@ -337,7 +356,7 @@ func (n *Client) Unsubscribe(topic string) error {
 
 func (n *Client) Request(topic string, request interface{}, data interface{}) error {
 	defer n.measure(topic, time.Now())
-	n.log.WithField("topic", topic).WithField("request", request).Debug("Request")
+	n.debug(topic, request, "request")
 	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
@@ -352,7 +371,7 @@ func (n *Client) Request(topic string, request interface{}, data interface{}) er
 		n.log.WithField("topic", topic).Error(err)
 		return err
 	}
-	n.log.WithField("topic", topic).WithField("response", response.Success).WithField("response", response.Message).WithField("data", string(response.Data)).Debug("Response")
+	n.debug(topic, string(response.Data), "response")
 
 	if !response.Success {
 		if response.Message == "record not found" {

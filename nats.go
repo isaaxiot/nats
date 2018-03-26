@@ -3,20 +3,20 @@ package nats
 import (
 	"encoding/json"
 	"fmt"
-	"runtime/debug"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats/encoders/protobuf"
+	"github.com/rollbar/rollbar-go"
 	"github.com/sirupsen/logrus"
 )
 
 const connectionRetries = 10
 
 type natsCB func(topic, reply string, msg map[string]interface{})
-type handler interface{}
 type plainHandler func(msg *nats.Msg)
 
 type Metrics interface {
@@ -55,10 +55,10 @@ func New(url, instance string) *Client {
 		n.log.WithField("subj", s.Subject).Error(e)
 	}))
 	n.opts = append(n.opts, nats.DisconnectHandler(func(nc *nats.Conn) {
-		n.log.WithField("err", nc.LastError()).Warn("Disconnected")
+		n.log.WithField("err", nc.LastError()).Warn("disconnected")
 	}))
 	n.opts = append(n.opts, nats.ReconnectHandler(func(nc *nats.Conn) {
-		n.log.WithField("err", nc.LastError()).Info("Got reconnected to ", nc.ConnectedUrl())
+		n.log.WithField("err", nc.LastError()).Info("reconnected to ", nc.ConnectedUrl())
 	}))
 	go n.connect()
 	n.subs = make(map[string]*nats.Subscription)
@@ -122,7 +122,7 @@ func (n *Client) connect() {
 		n.retry()
 	} else {
 		n.c = natsConnection
-		n.log.WithField("Broker", n.c.ConnectedUrl()).Info("NATS Client connected")
+		n.log.WithField("broker", n.c.ConnectedUrl()).Info("NATS client connected")
 		if n.jsonCon, err = nats.NewEncodedConn(n.c, nats.JSON_ENCODER); err != nil {
 			n.log.Error("error creating nats json encoded connection: ", err.Error())
 		}
@@ -144,6 +144,19 @@ func (n *Client) debug(topic string, payload interface{}, message string) {
 		return
 	}
 	n.log.WithField("topic", topic).WithField("payload", payload).Debug(message)
+}
+
+func (n *Client) handlePanic() {
+	//panic handler
+	if err := recover(); err != nil {
+		switch val := err.(type) {
+		case error:
+			rollbar.ErrorWithStackSkip("critical", val, 2)
+		default:
+			rollbar.Critical(val)
+		}
+		n.log.Error("recovered from: ", err)
+	}
 }
 
 func (n *Client) Publish(topic string, payload interface{}) error {
@@ -193,11 +206,7 @@ func (n *Client) PublishRequest(topic, reply string, payload interface{}) error 
 }
 
 func (n *Client) Callback(msg *nats.Msg) {
-	defer func() {
-		if recovery := recover(); recovery != nil {
-			n.log.WithField("bt", string(debug.Stack())).Error("Recovered from:", recovery)
-		}
-	}()
+	defer n.handlePanic()
 	n.debug(msg.Reply, string(msg.Data), msg.Subject)
 	if name, err := n.findWildcardSubscription(msg.Subject, n.cbs); err == nil {
 		n.cbs[name](msg)
@@ -217,11 +226,7 @@ func (n *Client) findWildcardSubscription(topic string, list map[string]func(msg
 }
 
 func (n *Client) CallbackE(topic, reply string, msg map[string]interface{}) {
-	defer func() {
-		if recovery := recover(); recovery != nil {
-			n.log.WithField("bt", string(debug.Stack())).Error("Recovered from:", recovery)
-		}
-	}()
+	defer n.handlePanic()
 	n.debug(reply, msg, topic)
 	n.cbse[topic](topic, reply, msg)
 }
@@ -276,38 +281,76 @@ func (n *Client) PlainSubscribe(topic string, callback plainHandler, extra ...bo
 	return nil
 }
 
-func (n *Client) subscribe(topic string, callback handler, protobuf bool) error {
-	defer func() {
-		if recovery := recover(); recovery != nil {
-			n.log.WithField("bt", string(debug.Stack())).Error("Recovered from:", recovery)
-		}
-	}()
+// Internal implementation that all public functions will use.
+func (n *Client) subscribe(subject string, cb nats.Handler, protobuf bool) error {
+	defer n.handlePanic()
 	n.mtx.Lock()
 	defer n.mtx.Unlock()
 	if n.c == nil || !n.c.IsConnected() {
 		return fmt.Errorf("NATS client is not connected")
 	}
+
+	argType, numArgs := argInfo(cb)
+
+	cbValue := reflect.ValueOf(cb)
+
 	conn := n.jsonCon
 	if protobuf {
 		conn = n.protoCon
 	}
-	if sub, err := conn.QueueSubscribe(topic, "distributed-queue-encoded", callback); err == nil {
-		if sub.IsValid() && !n.isSubscribed(topic) {
-			n.subs[topic] = sub
+
+	natsCB := func(m *nats.Msg) {
+		defer n.handlePanic()
+		var oV []reflect.Value
+
+		var oPtr reflect.Value
+		if argType.Kind() != reflect.Ptr {
+			oPtr = reflect.New(argType)
+		} else {
+			oPtr = reflect.New(argType.Elem())
 		}
-	} else {
+
+		if err := conn.Enc.Decode(m.Subject, m.Data, oPtr.Interface()); err != nil {
+			n.log.WithField("subject", m.Subject).Error(err)
+			return
+		}
+		if argType.Kind() != reflect.Ptr {
+			oPtr = reflect.Indirect(oPtr)
+		}
+
+		// Callback Arity
+		switch numArgs {
+		case 1:
+			oV = []reflect.Value{oPtr}
+		case 2:
+			subV := reflect.ValueOf(m.Subject)
+			oV = []reflect.Value{subV, oPtr}
+		case 3:
+			subV := reflect.ValueOf(m.Subject)
+			replyV := reflect.ValueOf(m.Reply)
+			oV = []reflect.Value{subV, replyV, oPtr}
+		}
+
+		cbValue.Call(oV)
+	}
+
+	sub, err := n.c.QueueSubscribe(subject, "distributed-queue-encoded", natsCB)
+	if err != nil {
 		n.log.Error(err)
 		return err
+	}
+	if sub.IsValid() && !n.isSubscribed(subject) {
+		n.subs[subject] = sub
 	}
 	return nil
 }
 
 // SubscribeTo unsafe subscriber with auto unmarshal
-func (n *Client) Subscribe(topic string, callback handler) error {
+func (n *Client) Subscribe(topic string, callback nats.Handler) error {
 	return n.subscribe(topic, callback, false)
 }
 
-func (n *Client) ProtoSubscribe(topic string, callback handler) error {
+func (n *Client) ProtoSubscribe(topic string, callback nats.Handler) error {
 	return n.subscribe(topic, callback, true)
 }
 
@@ -392,4 +435,17 @@ func (n *Client) NATS() *nats.Conn {
 
 func (n *Client) IsConnected() bool {
 	return n.c.IsConnected()
+}
+
+// Dissect the cb Handler's signature
+func argInfo(cb nats.Handler) (reflect.Type, int) {
+	cbType := reflect.TypeOf(cb)
+	if cbType.Kind() != reflect.Func {
+		panic("nats: Handler needs to be a func")
+	}
+	numArgs := cbType.NumIn()
+	if numArgs == 0 {
+		return nil, numArgs
+	}
+	return cbType.In(numArgs - 1), numArgs
 }

@@ -151,7 +151,7 @@ func (n *Client) handlePanic() {
 	if err := recover(); err != nil {
 		switch val := err.(type) {
 		case error:
-			rollbar.ErrorWithStackSkip("critical", val, 2)
+			rollbar.ErrorWithStackSkip("critical", val, 4)
 		default:
 			rollbar.Critical(val)
 		}
@@ -284,6 +284,9 @@ func (n *Client) PlainSubscribe(topic string, callback plainHandler, extra ...bo
 // Internal implementation that all public functions will use.
 func (n *Client) subscribe(subject string, cb nats.Handler, protobuf bool) error {
 	defer n.handlePanic()
+	if CB, ok := cb.(func(*nats.Msg)); ok {
+		return n.PlainSubscribe(subject, CB)
+	}
 	n.mtx.Lock()
 	defer n.mtx.Unlock()
 	if n.c == nil || !n.c.IsConnected() {

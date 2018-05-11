@@ -53,6 +53,15 @@ func New(url, instance string) *Client {
 	n.url = url
 	n.opts = append(n.opts, nats.ErrorHandler(func(_ *nats.Conn, s *nats.Subscription, e error) {
 		n.log.WithField("subj", s.Subject).Error(e)
+		if e == nats.ErrSlowConsumer {
+			pendingMsgs, _, err := s.Pending()
+			if err != nil {
+				n.log.Errorf("couldn't get pending messages: %v", err)
+				return
+			}
+			n.log.Errorf("Falling behind with %d pending messages on subject %q.\n",
+				pendingMsgs, s.Subject)
+		}
 	}))
 	n.opts = append(n.opts, nats.DisconnectHandler(func(nc *nats.Conn) {
 		n.log.WithField("err", nc.LastError()).Warn("disconnected")

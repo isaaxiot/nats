@@ -10,7 +10,6 @@ import (
 
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats/encoders/protobuf"
-	"github.com/rollbar/rollbar-go"
 	"github.com/sirupsen/logrus"
 )
 
@@ -158,12 +157,6 @@ func (n *Client) debug(topic string, payload interface{}, message string) {
 func (n *Client) handlePanic() {
 	//panic handler
 	if err := recover(); err != nil {
-		switch val := err.(type) {
-		case error:
-			rollbar.ErrorWithStackSkip("critical", val, 4)
-		default:
-			rollbar.Critical(val)
-		}
 		n.log.Error("recovered from: ", err)
 	}
 }
